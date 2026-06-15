@@ -164,6 +164,7 @@ DOCKEREOF
 
 # Chrony configuration
 echo "[*] Configuring Chrony..."
+mkdir -p "$CHROOT/etc/chrony"
 cat > "$CHROOT/etc/chrony/chrony.conf" <<'CHRONYEOF'
 # NTP servers
 server 0.pool.ntp.org iburst
