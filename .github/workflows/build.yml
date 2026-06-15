@@ -7,9 +7,10 @@ on:
       - 'v*'
 
 env:
-  PASSWORD: "alpine-ci"
-  WIFI_SSID: "test"
-  WIFI_PASS: "testpass"
+  PASSWORD: "root"
+  AP_ENABLED: "yes"
+  AP_SSID: "4G-UFI-XXXX"
+  AP_PASS: "12345678"
   DTB_FILE: "msm8916-yiming-uz801v3.dtb"
 
 jobs:

@@ -5,6 +5,8 @@ type=ethernet
 interface-name=usb0
 autoconnect=true
 autoconnect-priority=10
+master=br0
+slave-type=bridge
 
 [ethernet]
 

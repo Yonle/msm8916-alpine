@@ -10,8 +10,8 @@ STAGING="$(mktemp -d)"
 CHROOT="$STAGING/rootfs"
 
 HOST_NAME="${HOST_NAME:-uz801a}"
-RELEASE="${RELEASE:-v3.21}"
-PMOS_RELEASE="${PMOS_RELEASE:-v25.06}"
+RELEASE="${RELEASE:-v3.22}"
+PMOS_RELEASE="${PMOS_RELEASE:-v26.06}"
 MIRROR="${MIRROR:-http://dl-cdn.alpinelinux.org/alpine}"
 PMOS_MIRROR="${PMOS_MIRROR:-http://mirror.postmarketos.org/postmarketos}"
 
@@ -81,15 +81,16 @@ apk add --no-cache --no-interactive --allow-untrusted postmarketos-keys
 apk add --no-cache --no-interactive \
     openrc \
     eudev udev-init-scripts udev-init-scripts-openrc \
-    shadow sudo \
+    shadow doas \
     e2fsprogs e2fsprogs-extra \
     linux-postmarketos-qcom-msm8916 \
     msm-firmware-loader \
     rmtfs \
+    hostapd \
     modemmanager \
     networkmanager networkmanager-cli networkmanager-wifi networkmanager-wwan networkmanager-dnsmasq \
     wpa_supplicant \
-    iptables \
+    nftables \
     dropbear \
     networkmanager-tui \
     nano \
@@ -114,9 +115,6 @@ echo ${USERNAME}:${PASSWORD}::::/home/${USERNAME}:/bin/bash | newusers
 printf 'PS1=\"\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]$ \"\n' > /home/${USERNAME}/.bash_profile
 chown ${USERNAME}:${USERNAME} /home/${USERNAME}/.bash_profile
 
-# Add user to docker group
-addgroup ${USERNAME} docker
-
 # Enable system services
 rc-update add devfs sysinit
 rc-update add dmesg sysinit
@@ -129,14 +127,17 @@ rc-update add modules boot
 rc-update add sysctl boot
 rc-update add hostname boot
 rc-update add bootmisc boot
+rc-update add nftables boot
 rc-update add mount-ro shutdown
 rc-update add killprocs shutdown
 rc-update add savecache shutdown
+rc-update add networking default
 
 # Enable essential application services
 rc-update add dropbear default
 rc-update add modemmanager default
 rc-update add networkmanager default
+rc-update add hostapd default
 rc-update add rmtfs default
 rc-update add local default
 
@@ -145,22 +146,7 @@ $(for svc in ${SERVICES_AUTOSTART:-}; do echo "rc-update add $svc default"; done
 "
 
 # Sudo config
-echo "${USERNAME} ALL=(ALL:ALL) NOPASSWD: ALL" > "$CHROOT/etc/sudoers.d/${USERNAME}"
-
-# Docker configuration
-echo "[*] Configuring Docker..."
-mkdir -p "$CHROOT/etc/docker"
-cat > "$CHROOT/etc/docker/daemon.json" <<'DOCKEREOF'
-{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  },
-  "storage-driver": "overlay2",
-  "iptables": true
-}
-DOCKEREOF
+echo "permit nopass ${USERNAME}" > "$CHROOT/etc/doas.d/user.conf"
 
 # Chrony configuration
 echo "[*] Configuring Chrony..."
@@ -201,15 +187,7 @@ mkdir -p "$CHROOT/etc/NetworkManager/system-connections"
 cp configs/network-manager/*.nmconnection "$CHROOT/etc/NetworkManager/system-connections/" 2>/dev/null || true
 chmod 0600 "$CHROOT/etc/NetworkManager/system-connections/"* 2>/dev/null || true
 
-# Substitute WiFi placeholders if WiFi is enabled and credentials are provided
-if [ "${WIFI_ENABLED:-yes}" = "yes" ] && [ -n "${WIFI_SSID:-}" ]; then
-    echo "[*] Configuring WiFi connection (SSID: ${WIFI_SSID})"
-    sed -i "s/__SSID__/${WIFI_SSID}/g" "$CHROOT/etc/NetworkManager/system-connections/wlan.nmconnection"
-    sed -i "s/__PASS__/${WIFI_PASS:-}/g" "$CHROOT/etc/NetworkManager/system-connections/wlan.nmconnection"
-else
-    echo "[*] WiFi disabled or no SSID provided — removing wlan config"
-    rm -f "$CHROOT/etc/NetworkManager/system-connections/wlan.nmconnection"
-fi
+cp conrigs/network/interfaces "$CHROOT/etc/network/interfaces"
 
 # Configure usb0 connection
 mkdir -p "$CHROOT/etc/NetworkManager/dnsmasq-shared.d"
@@ -238,6 +216,22 @@ EOF
     fi
 fi
 
+# Configure AP
+if [ "${AP_ENABLED}" = "yes" ]; then
+	echo "[*] Setting up AP"
+
+	mkdir -p "$CHROOT/etc/hostapd"
+	AP_CONF="$CHROOT/etc/hostapd.conf"
+	cp configs/hostapd.conf $AP_CONF
+
+	sed -i "s|__SSID__|${AP_SSID}|g" "$AP_CONF"
+	sed -i "s|__PASS__|${AP_PASS}|g" "$AP_CONF"
+
+	echo "[*] AP: ssid: ${AP_SSID}, pass: ${AP_PASS}"
+else
+	chroot "$CHROOT" ash -l -c "rc-update del hostapd default"
+fi
+
 # DTBs: compiled (files/dtbs/) take priority, then precompiled (dtbs/)
 mkdir -p "$CHROOT/boot/dtbs/qcom"
 cp "$OUT_DIR/dtbs/"*.dtb "$CHROOT/boot/dtbs/qcom/" 2>/dev/null || true
@@ -245,14 +239,9 @@ cp dtbs/*.dtb "$CHROOT/boot/dtbs/qcom/" 2>/dev/null || true
 
 mkdir -p "$CHROOT/boot/extlinux"
 cat > "$CHROOT/boot/extlinux/extlinux.conf" <<EOF
-TIMEOUT 10
-DEFAULT alpine
-
-LABEL alpine
-    MENU LABEL Alpine Linux
-    linux /vmlinuz
-    fdt /dtbs/qcom/${DTB_FILE}
-    append earlycon root=/dev/mmcblk0p14 console=ttyMSM0,115200 no_framebuffer=true rw rootwait
+linux /vmlinuz
+fdt /dtbs/qcom/${DTB_FILE}
+append earlycon root=/dev/mmcblk0p14 console=ttyMSM0,115200 no_framebuffer=true rw rootwait
 EOF
 
 cat > "$CHROOT/etc/fstab" <<EOF
@@ -271,29 +260,6 @@ chroot "$CHROOT" ash -l -c "rc-update add usb-gadget default" || true
 install -Dm0755 configs/expand-rootfs/expand-rootfs.sh "$CHROOT/usr/sbin/expand-rootfs.sh"
 install -Dm0755 configs/expand-rootfs/expand-rootfs.init "$CHROOT/etc/init.d/expand-rootfs"
 chroot "$CHROOT" ash -l -c "rc-update add expand-rootfs boot" || true
-
-# zram swap (compressed in-RAM swap, ~256MB effective headroom)
-echo "[*] Configuring zram swap..."
-mkdir -p "$CHROOT/etc/local.d"
-cat > "$CHROOT/etc/local.d/zram.start" << 'EOF'
-#!/bin/sh
-modprobe zram
-echo 1 > /sys/block/zram0/reset
-echo lz4 > /sys/block/zram0/comp_algorithm
-echo 256M > /sys/block/zram0/disksize
-mkswap /dev/zram0
-swapon /dev/zram0
-EOF
-chmod +x "$CHROOT/etc/local.d/zram.start"
-
-# Copy install scripts to user home for first boot
-for script in stacks/install-*.sh; do
-    [ -f "$script" ] || continue
-    name="$(basename "$script")"
-    echo "[*] Copying $name..."
-    cp "$script" "$CHROOT/home/${USERNAME}/$name"
-    chroot "$CHROOT" ash -l -c "chmod +x /home/${USERNAME}/$name && chown ${USERNAME}:${USERNAME} /home/${USERNAME}/$name"
-done
 
 # Create tarball
 echo "[*] Creating tarball..."
@@ -315,9 +281,7 @@ cp "$STAGING/alpine_rootfs.tgz" "$OUT_DIR/rootfs.tgz"
 
 echo "[+] OK: Alpine rootfs ready in $OUT_DIR"
 echo "    - Kernel: linux-postmarketos-qcom-msm8916 from ${PMOS_RELEASE}"
-echo "    - Docker: enabled and configured"
 echo "    - Chrony: enabled with NTP servers"
-echo "    - User '${USERNAME}' in docker group"
 echo "    - DTB: ${DTB_FILE}"
 echo "    - $OUT_DIR/rootfs/ (directory)"
 echo "    - $OUT_DIR/rootfs.tgz (tarball)"
